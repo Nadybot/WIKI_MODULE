@@ -1,0 +1,12 @@
+name = "WIKI_MODULE"
+description = "Query Wikipedia from within Nadybot"
+version = "0.1.0"
+author = "Nadyita"
+github = "Nadybot/WIKI_MODULE"
+bot_type = "Nadybot"
+bot_version = "^5.0.0-beta1"
+
+[requires]
+ext-Reflection = "*"
+ext-pcre = "*"
+ext-json = "*"

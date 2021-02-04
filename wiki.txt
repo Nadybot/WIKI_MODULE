@@ -1,0 +1,5 @@
+To show the Wikipedia extract about "Orcas":
+<highlight><tab><symbol>wiki Orca<end>
+
+To show the Wikipedia page about "Mark" which lists some pages to choose from:
+<highlight><tab><symbol>wiki Mark<end>
