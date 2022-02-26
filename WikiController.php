@@ -2,49 +2,42 @@
 
 namespace Nadybot\User\Modules\WIKI_MODULE;
 
-use StdClass;
-use JsonException;
-use Nadybot\Core\CommandReply;
-use Nadybot\Core\Http;
-use Nadybot\Core\HttpResponse;
-use Nadybot\Core\Nadybot;
-use Nadybot\Core\Text;
+use Nadybot\Core\{
+	Attributes as NCA,
+	CmdContext,
+	Http,
+	HttpResponse,
+	ModuleInstance,
+	Text,
+};
+
+use Safe\Exceptions\JsonException;
+use function Safe\json_decode;
 
 /**
- * Authors:
- *	- Nadyita (RK5)
- *
- * @Instance
- *
- * Commands this controller contains:
- *	@DefineCommand(
- *		command     = 'wiki',
- *		accessLevel = 'all',
- *		description = 'Look up a word in Wikipedia',
- *		help        = 'wiki.txt'
- *	)
+ * @author Nadyita (RK5) <nadyita@hodorraid.org>
  */
-class WikiController {
 
-	/**
-	 * Name of the module.
-	 * Set automatically by module loader.
-	 */
-	public string $moduleName;
-
-	/** @Inject */
+#[
+	NCA\Instance,
+	NCA\DefineCommand(
+		command:     'wiki',
+		accessLevel: 'guest',
+		description: 'Look up a word in Wikipedia',
+	)
+]
+class WikiController extends ModuleInstance {
+	#[NCA\Inject]
 	public Http $http;
 
-	/** @Inject */
+	#[NCA\Inject]
 	public Text $text;
 
 	/**
-	 * Command to look up wiki entries
-	 *
-	 * @HandlesCommand("wiki")
-	 * @Matches("/^wiki\s+(.+)$/i")
+	 * Look up Wikipedia entries
 	 */
-	public function wikiCommand(string $message, string $channel, string $sender, CommandReply $sendto, array $args): void {
+	#[NCA\HandlesCommand("wiki")]
+	public function wikiCommand(CmdContext $context, string $search): void {
 		$this->http
 			->get('https://en.wikipedia.org/w/api.php')
 			->withQueryParams([
@@ -54,43 +47,43 @@ class WikiController {
 				'exintro' => 1,
 				'explaintext' => 1,
 				'redirects' => 1,
-				'titles' => html_entity_decode($args[1]),
+				'titles' => html_entity_decode($search),
 			])
 			->withTimeout(5)
-			->withCallback([$this, "handleExtractResponse"], $sendto);
+			->withCallback([$this, "handleExtractResponse"], $context);
 	}
 
 	/**
 	 * Handle the response for a list of links origination from a page
 	 */
-	public function handleLinksResponse(HttpResponse $response, CommandReply $sendto, WikiPage $page): void {
-		$linkPage = $this->parseResponseIntoWikiPage($response, $sendto);
+	public function handleLinksResponse(HttpResponse $response, CmdContext $context): void {
+		$linkPage = $this->parseResponseIntoWikiPage($response, $context);
 		if ($linkPage === null) {
 			return;
 		}
 		$blobs = array_map(
-			function($link) {
+			function(WikiLink $link) {
 				return $this->text->makeChatCmd($link->title, '/tell <myname> wiki ' . $link->title);
 			},
 			$linkPage->links
 		);
 		$blob = join("\n", $blobs);
 		$msg = $this->text->makeBlob($linkPage->title . ' (disambiguation)', $blob);
-		$sendto->reply($msg);
+		$context->reply($msg);
 	}
 
 	/**
 	 * Handle the response for a wiki page
 	 */
-	public function handleExtractResponse(HttpResponse $response, CommandReply $sendto): void {
-		$page = $this->parseResponseIntoWikiPage($response, $sendto);
+	public function handleExtractResponse(HttpResponse $response, CmdContext $context): void {
+		$page = $this->parseResponseIntoWikiPage($response, $context);
 		if ($page === null) {
 			return;
 		}
 
 		// In case we have a page that gives us a list of terms, but no exact match,
 		// query for all links in that page and present them
-		if (preg_match('/may refer to:$/', trim($page->extract))) {
+		if (preg_match('/may refer to:$/', trim($page->extract??""))) {
 			$this->http
 				->get('https://en.wikipedia.org/w/api.php')
 				->withQueryParams([
@@ -103,7 +96,7 @@ class WikiController {
 					'titles' => $page->title,
 				])
 				->withTimeout(5)
-				->withCallback([$this, "handleLinksResponse"], $sendto, $page);
+				->withCallback([$this, "handleLinksResponse"], $context);
 			return;
 		}
 		$this->http
@@ -112,34 +105,38 @@ class WikiController {
 				'format' => 'json',
 				'action' => 'parse',
 				'prop' => 'text',
-				'pageid' => $page->id,
+				'pageid' => $page->pageid,
 			])
 			->withTimeout(5)
-			->withCallback([$this, "handleParseResponse"], $sendto, $page);
+			->withCallback([$this, "handleParseResponse"], $context, $page);
 		return;
 	}
 
 	/**
 	 * Handle the response for a list of links origination from a page
 	 */
-	public function handleParseResponse(HttpResponse $response, CommandReply $sendto, WikiPage $page): void {
+	public function handleParseResponse(HttpResponse $response, CmdContext $context, WikiPage $page): void {
 		if (isset($response->error)) {
 			$msg = "There was an error getting data from Wikipedia: ".
 				$response->error . ". Please try again later.";
-			$sendto->reply($msg);
+			$context->reply($msg);
+			return;
+		}
+		if (!isset($response->body)) {
+			$msg = "Empty reply received from Wikipedia. ".
+				"Please try again later.";
+			$context->reply($msg);
 			return;
 		}
 		try {
-			$wikiData = json_decode($response->body, false, 8, JSON_THROW_ON_ERROR);
+			$wikiData = json_decode($response->body, false, 8);
 		} catch (JsonException $e) {
 			$msg = "Unable to parse Wikipedia's reply.";
-			$sendto->reply($msg);
+			$context->reply($msg);
 			return;
 		}
-		$blob = $page->extract;
+		$blob = $page->extract??"";
 		$blob = preg_replace('/([a-z0-9])\.([A-Z])/', '$1. $2', $blob);
-		$searches = [];
-		$replaces = [];
 		$links = [];
 		preg_match_all("/(.)<a href=\"\/wiki\/(.+?)\".*?>(.*?)<\/a>(.)/", $wikiData->parse->text->{"*"}, $matches);
 		for ($i = 0; $i < count($matches[1]); $i++) {
@@ -158,6 +155,10 @@ class WikiController {
 			$blob = preg_replace_callback(
 				"/" . preg_quote($text, "/") . "/",
 				function (array $matches) use ($blob, $text, $link): string {
+					/**
+					 * @var array<int,array<int|string>> $matches
+					 * @phpstan-var array<int,array{string,int}> $matches
+					 */
 					$leftOpen = strrpos(substr($blob, 0, $matches[0][1]), "<a");
 					$leftClose = strrpos(substr($blob, 0, $matches[0][1]), "</a");
 					if ($leftOpen > $leftClose) {
@@ -174,36 +175,41 @@ class WikiController {
 			);
 		}
 		$msg = $this->text->makeBlob($page->title, $blob);
-		$sendto->reply($msg);
+		$context->reply($msg);
 	}
 
 	/**
 	 * Parse the AsyncHttp reply into a WikiPage object or null on error
 	 */
-	protected function parseResponseIntoWikiPage(HttpResponse $response, CommandReply $sendto): ?WikiPage {
+	protected function parseResponseIntoWikiPage(HttpResponse $response, CmdContext $context): ?WikiPage {
 		if (isset($response->error)) {
 			$msg = "There was an error getting data from Wikipedia: ".
-				$response->error . ". Please try again later.";
-			$sendto->reply($msg);
+				"{$response->error}. Please try again later.";
+			$context->reply($msg);
+			return null;
+		}
+		if (!isset($response->body)) {
+			$msg = "Empty reply received from Wikipedia. Please try again later.";
+			$context->reply($msg);
 			return null;
 		}
 		try {
-			$wikiData = json_decode($response->body, false, 8, JSON_THROW_ON_ERROR);
+			$wikiData = json_decode($response->body, true, 8);
 		} catch (JsonException $e) {
-			$msg = "Unable to parse Wikipedia's reply.";
-			$sendto->reply($msg);
+			$msg = "Unable to parse Wikipedia's reply: " . $e->getMessage();
+			$context->reply($msg);
 			return null;
 		}
-		$pageID = array_keys(get_object_vars($wikiData->query->pages))[0];
-		$page = $wikiData->query->pages->{$pageID};
+		/** @var int */
+		$pageID = array_keys($wikiData["query"]["pages"])[0];
+		$page = $wikiData["query"]["pages"][$pageID];
 		if ($pageID === -1) {
-			$msg = "Couldn't find a Wikipedia entry for <highlight>{$page->title}<end>.";
-			$sendto->reply($msg);
+			$msg = "Couldn't find a Wikipedia entry for <highlight>{$page['title']}<end>.";
+			$context->reply($msg);
 			return null;
 		}
-		$wikiPage = new WikiPage();
-		$wikiPage->fromJSON($page);
-		$wikiPage->id = (int)$pageID;
-		return $wikiPage;
+		$page["pageid"] = (int)$pageID;
+		$wikiRef = new WikiPage($page);
+		return $wikiRef;
 	}
 }
